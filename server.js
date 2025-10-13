@@ -29,10 +29,19 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // Create HTTP server (minimal, just for Socket.IO)
 const httpServer = http.createServer((req, res) => {
-  // Health check endpoint
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', service: 'SalesCrew Chat Server' }));
+  console.log(`HTTP ${req.method} ${req.url}`);
+  
+  // Health check endpoints (Railway checks root by default)
+  if (req.url === '/health' || req.url === '/' || req.url === '') {
+    res.writeHead(200, { 
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    });
+    res.end(JSON.stringify({ 
+      status: 'ok', 
+      service: 'SalesCrew Chat Server',
+      timestamp: new Date().toISOString()
+    }));
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('SalesCrew Chat Server - Socket.IO running');
