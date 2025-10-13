@@ -284,6 +284,11 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`🌍 Allowed origin: ${ALLOWED_ORIGIN}`);
   console.log(`🔗 Supabase connected: ${SUPABASE_URL}`);
   console.log('===========================================');
+  
+  // Keep the process alive with periodic logging
+  setInterval(() => {
+    console.log(`[${new Date().toISOString()}] Server alive - Active connections: ${io.engine.clientsCount}`);
+  }, 30000); // Log every 30 seconds
 });
 
 // Graceful shutdown
