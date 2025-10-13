@@ -291,11 +291,28 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   }, 30000); // Log every 30 seconds
 });
 
-// Graceful shutdown
+// Graceful shutdown (only on explicit shutdown, keep running otherwise)
 process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  httpServer.close(() => {
-    console.log('HTTP server closed');
-    process.exit(0);
-  });
+  console.log('⚠️  SIGTERM signal received - Railway wants to stop the server');
+  console.log('Attempting to keep server alive...');
+  
+  // Don't close immediately - Railway might be testing
+  setTimeout(() => {
+    console.log('Graceful shutdown after 10 seconds');
+    httpServer.close(() => {
+      console.log('HTTP server closed');
+      process.exit(0);
+    });
+  }, 10000);
+});
+
+// Prevent uncaught exceptions from crashing
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  // Don't exit, keep running
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit, keep running
 });
