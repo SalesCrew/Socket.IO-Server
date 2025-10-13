@@ -13,14 +13,14 @@ const { createClient } = require('@supabase/supabase-js');
 
 // Environment variables (set these in Railway dashboard)
 const PORT = process.env.PORT || 3000;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.PLEASE_SERVICE_ROLE_KEY;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'; // Set to your Vercel URL in production
 
 // Validate environment variables
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('ERROR: Missing required environment variables');
-  console.error('Required: SUPABASE_URL, SUPABASE_SERVICE_KEY');
+  console.error('Required: NEXT_PUBLIC_SUPABASE_URL, PLEASE_SERVICE_ROLE_KEY');
   process.exit(1);
 }
 
