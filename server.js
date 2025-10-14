@@ -176,11 +176,40 @@ io.on('connection', async (socket) => {
         return callback({ error: 'Failed to send message' });
       }
 
+      // Fetch reply_to message details if this is a reply
+      let replyToDetails = null;
+      if (replyToId) {
+        const { data: replyToMessage } = await supabase
+          .from('chat_messages')
+          .select('id, sender_id, message_text, message_type, file_url, file_name')
+          .eq('id', replyToId)
+          .single();
+        
+        if (replyToMessage) {
+          // Fetch sender name for the reply-to message
+          const { data: replyToSenderProfile } = await supabase
+            .from('user_profiles')
+            .select('display_name')
+            .eq('user_id', replyToMessage.sender_id)
+            .single();
+          
+          replyToDetails = {
+            id: replyToMessage.id,
+            sender_name: replyToSenderProfile?.display_name || 'Unknown',
+            message_text: replyToMessage.message_text,
+            message_type: replyToMessage.message_type,
+            file_url: replyToMessage.file_url,
+            file_name: replyToMessage.file_name,
+          };
+        }
+      }
+
       // Enrich message with sender info
       const messageWithSender = {
         ...newMessage,
         sender_name: socket.userName,
         sender_role: socket.userRole,
+        reply_to: replyToDetails,
       };
 
       // Broadcast to room
