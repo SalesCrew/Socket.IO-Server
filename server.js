@@ -287,6 +287,72 @@ io.on('connection', async (socket) => {
   });
 
   // ============================================
+  // DELETE MESSAGE
+  // ============================================
+  socket.on('delete_message', async (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    try {
+      const { conversationId, messageId, deleteForEveryone } = data;
+
+      // Validate participant
+      const { data: participant } = await supabase
+        .from('chat_participants')
+        .select('conversation_id')
+        .eq('conversation_id', conversationId)
+        .eq('user_id', socket.userId)
+        .single();
+
+      if (!participant) {
+        return cb({ error: 'Not a participant in this conversation' });
+      }
+
+      // If deleteForEveryone is false, no broadcast needed (handled by API only)
+      if (!deleteForEveryone) {
+        return cb({ success: true });
+      }
+
+      // For deleteForEveryone: true, verify permissions
+      // Get the message to check ownership
+      const { data: message, error: fetchError } = await supabase
+        .from('chat_messages')
+        .select('sender_id, conversation_id')
+        .eq('id', messageId)
+        .single();
+
+      if (fetchError || !message) {
+        console.error('❌ Error fetching message:', fetchError);
+        return cb({ error: 'Message not found' });
+      }
+
+      // Verify message belongs to this conversation
+      if (message.conversation_id !== conversationId) {
+        return cb({ error: 'Message does not belong to this conversation' });
+      }
+
+      // Check if user is message sender OR admin
+      const isOwner = message.sender_id === socket.userId;
+      const isAdmin = ['admin_staff', 'admin_of_admins'].includes(socket.userRole);
+
+      if (!isOwner && !isAdmin) {
+        return cb({ error: 'Not authorized to delete this message for everyone' });
+      }
+
+      // Broadcast deletion to all participants in the conversation room
+      io.to(conversationId).emit('message_deleted', {
+        conversationId,
+        messageId,
+        deleteForEveryone: true,
+      });
+
+      console.log(`🗑️  Message ${messageId} deleted for everyone by ${socket.userName} in ${conversationId}`);
+      cb({ success: true });
+    } catch (error) {
+      console.error('❌ Error deleting message:', error);
+      cb({ error: 'Failed to delete message' });
+    }
+  });
+
+  // ============================================
   // JOIN CONVERSATION (Dynamic)
   // ============================================
   socket.on('join_conversation', ({ conversationId }) => {
