@@ -176,6 +176,12 @@ io.on('connection', async (socket) => {
         return callback({ error: 'Failed to send message' });
       }
 
+      // Update conversation's updated_at timestamp
+      await supabase
+        .from('chat_conversations')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', conversationId);
+
       // Fetch reply_to message details if this is a reply
       let replyToDetails = null;
       if (replyToId) {
