@@ -366,7 +366,18 @@ io.on('connection', async (socket) => {
     try {
       const { conversationId, messageId, newText } = data;
 
-      // Validate participant
+      // 1) Validate input text
+      if (!newText || typeof newText !== 'string' || newText.trim().length === 0) {
+        socket.emit('error', { type: 'edit_message_failed', message: 'Message text cannot be empty' });
+        return cb({ error: 'Message text cannot be empty' });
+      }
+
+      if (newText.length > 5000) {
+        socket.emit('error', { type: 'edit_message_failed', message: 'Message text too long (max 5000 chars)' });
+        return cb({ error: 'Message text too long (max 5000 chars)' });
+      }
+
+      // 2) Validate participant
       const { data: participant } = await supabase
         .from('chat_participants')
         .select('conversation_id')
@@ -375,71 +386,85 @@ io.on('connection', async (socket) => {
         .single();
 
       if (!participant) {
+        socket.emit('error', { type: 'edit_message_failed', message: 'Not a participant in this conversation' });
         return cb({ error: 'Not a participant in this conversation' });
       }
 
-      // Fetch the message to validate ownership and type
+      // 3) Fetch the message to validate ownership, type, and deleted status
       const { data: message, error: fetchError } = await supabase
         .from('chat_messages')
-        .select('sender_id, message_type, is_deleted, conversation_id')
+        .select('sender_id, message_type, deleted_for_all, conversation_id')
         .eq('id', messageId)
         .single();
 
       if (fetchError || !message) {
         console.error('❌ Error fetching message:', fetchError);
+        socket.emit('error', { type: 'edit_message_failed', message: 'Message not found' });
         return cb({ error: 'Message not found' });
       }
 
       // Verify message belongs to this conversation
       if (message.conversation_id !== conversationId) {
+        socket.emit('error', { type: 'edit_message_failed', message: 'Message does not belong to this conversation' });
         return cb({ error: 'Message does not belong to this conversation' });
       }
 
-      // Validate user owns the message
+      // Validate user owns the message (only author can edit)
       if (message.sender_id !== socket.userId) {
+        socket.emit('error', { type: 'edit_message_failed', message: 'Not authorized to edit this message' });
         return cb({ error: 'Not authorized to edit this message' });
       }
 
       // Validate message type is text
       if (message.message_type !== 'text') {
+        socket.emit('error', { type: 'edit_message_failed', message: 'Only text messages can be edited' });
         return cb({ error: 'Only text messages can be edited' });
       }
 
       // Validate message is not deleted
-      if (message.is_deleted) {
-        return cb({ error: 'Cannot edit deleted message' });
+      if (message.deleted_for_all) {
+        socket.emit('error', { type: 'edit_message_failed', message: 'Cannot edit deleted messages' });
+        return cb({ error: 'Cannot edit deleted messages' });
       }
 
-      // Update the message
+      // 4) Update the message (trim text, set edited flag)
+      // IMPORTANT: Do NOT update chat_conversations.updated_at (edits must not reorder)
+      const trimmedText = newText.trim();
       const updatedAt = new Date().toISOString();
-      const { error: updateError } = await supabase
+      
+      const { data: updated, error: updateError } = await supabase
         .from('chat_messages')
         .update({
-          message_text: newText,
+          message_text: trimmedText,
           edited: true,
           updated_at: updatedAt,
         })
-        .eq('id', messageId);
+        .eq('id', messageId)
+        .eq('sender_id', socket.userId) // Double-check ownership in query
+        .select('updated_at')
+        .single();
 
-      if (updateError) {
+      if (updateError || !updated) {
         console.error('❌ Error updating message:', updateError);
-        return cb({ error: 'Failed to edit message' });
+        socket.emit('error', { type: 'edit_message_failed', message: 'Failed to update message' });
+        return cb({ error: 'Failed to update message' });
       }
 
-      // Broadcast to all participants in the conversation room
+      // 5) Broadcast to all participants in the conversation room
       io.to(conversationId).emit('message_edited', {
         conversationId,
         messageId,
-        message_text: newText,
+        message_text: trimmedText,
         edited: true,
-        updated_at: updatedAt,
+        updated_at: updated.updated_at || updatedAt,
       });
 
       console.log(`✏️  Message ${messageId} edited by ${socket.userName} in ${conversationId}`);
       cb({ success: true });
     } catch (error) {
       console.error('❌ Error editing message:', error);
-      cb({ error: 'Failed to edit message' });
+      socket.emit('error', { type: 'edit_message_failed', message: 'Internal server error' });
+      cb({ error: 'Internal server error' });
     }
   });
 
