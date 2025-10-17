@@ -359,6 +359,91 @@ io.on('connection', async (socket) => {
   });
 
   // ============================================
+  // EDIT MESSAGE
+  // ============================================
+  socket.on('edit_message', async (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    try {
+      const { conversationId, messageId, newText } = data;
+
+      // Validate participant
+      const { data: participant } = await supabase
+        .from('chat_participants')
+        .select('conversation_id')
+        .eq('conversation_id', conversationId)
+        .eq('user_id', socket.userId)
+        .single();
+
+      if (!participant) {
+        return cb({ error: 'Not a participant in this conversation' });
+      }
+
+      // Fetch the message to validate ownership and type
+      const { data: message, error: fetchError } = await supabase
+        .from('chat_messages')
+        .select('sender_id, message_type, is_deleted, conversation_id')
+        .eq('id', messageId)
+        .single();
+
+      if (fetchError || !message) {
+        console.error('❌ Error fetching message:', fetchError);
+        return cb({ error: 'Message not found' });
+      }
+
+      // Verify message belongs to this conversation
+      if (message.conversation_id !== conversationId) {
+        return cb({ error: 'Message does not belong to this conversation' });
+      }
+
+      // Validate user owns the message
+      if (message.sender_id !== socket.userId) {
+        return cb({ error: 'Not authorized to edit this message' });
+      }
+
+      // Validate message type is text
+      if (message.message_type !== 'text') {
+        return cb({ error: 'Only text messages can be edited' });
+      }
+
+      // Validate message is not deleted
+      if (message.is_deleted) {
+        return cb({ error: 'Cannot edit deleted message' });
+      }
+
+      // Update the message
+      const updatedAt = new Date().toISOString();
+      const { error: updateError } = await supabase
+        .from('chat_messages')
+        .update({
+          message_text: newText,
+          edited: true,
+          updated_at: updatedAt,
+        })
+        .eq('id', messageId);
+
+      if (updateError) {
+        console.error('❌ Error updating message:', updateError);
+        return cb({ error: 'Failed to edit message' });
+      }
+
+      // Broadcast to all participants in the conversation room
+      io.to(conversationId).emit('message_edited', {
+        conversationId,
+        messageId,
+        message_text: newText,
+        edited: true,
+        updated_at: updatedAt,
+      });
+
+      console.log(`✏️  Message ${messageId} edited by ${socket.userName} in ${conversationId}`);
+      cb({ success: true });
+    } catch (error) {
+      console.error('❌ Error editing message:', error);
+      cb({ error: 'Failed to edit message' });
+    }
+  });
+
+  // ============================================
   // REACT TO MESSAGE
   // ============================================
   socket.on('react_to_message', async (data) => {
