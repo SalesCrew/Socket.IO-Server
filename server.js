@@ -62,6 +62,38 @@ const io = new Server(httpServer, {
 console.log(`Socket.IO CORS origin set to: ${ALLOWED_ORIGIN}`);
 
 // ============================================
+// HELPERS
+// ============================================
+function isAdminRole(role) {
+  return role === 'admin_staff' || role === 'admin_of_admins';
+}
+
+function validatePollInput(question, options, allowMultiple) {
+  if (!question || typeof question !== 'string') {
+    return 'Question is required';
+  }
+  const trimmedQuestion = question.trim();
+  if (trimmedQuestion.length < 1 || trimmedQuestion.length > 200) {
+    return 'Question must be 1–200 characters';
+  }
+  if (!Array.isArray(options)) {
+    return 'Options must be an array';
+  }
+  if (options.length < 2 || options.length > 12) {
+    return 'Options must be between 2 and 12';
+  }
+  for (const opt of options) {
+    if (typeof opt !== 'string' || opt.trim().length < 1 || opt.trim().length > 120) {
+      return 'Each option must be 1–120 characters';
+    }
+  }
+  if (typeof allowMultiple !== 'boolean') {
+    return 'allowMultiple must be a boolean';
+  }
+  return null;
+}
+
+// ============================================
 // AUTHENTICATION MIDDLEWARE
 // ============================================
 io.use(async (socket, next) => {
@@ -156,6 +188,106 @@ io.on('connection', async (socket) => {
         return callback({ error: 'Cannot send messages to read-only conversation' });
       }
 
+      // ============================================
+      // POLL MESSAGE CREATION
+      // ============================================
+      if (messageType === 'poll') {
+        if (!isAdminRole(socket.userRole)) {
+          return callback({ error: 'Only admins can create polls' });
+        }
+
+        const pollQuestion = data.pollQuestion;
+        const pollOptions = data.pollOptions;
+        const allowMultiple = data.allowMultiple === true;
+
+        const validationError = validatePollInput(pollQuestion, pollOptions, allowMultiple);
+        if (validationError) {
+          return callback({ error: validationError });
+        }
+
+        // Insert poll
+        const { data: poll, error: pollInsertError } = await supabase
+          .from('chat_polls')
+          .insert({
+            conversation_id: conversationId,
+            created_by: socket.userId,
+            question: pollQuestion.trim(),
+            allow_multiple: allowMultiple,
+          })
+          .select()
+          .single();
+
+        if (pollInsertError || !poll) {
+          console.error('❌ Error inserting poll:', pollInsertError);
+          return callback({ error: 'Failed to create poll' });
+        }
+
+        // Insert poll options
+        const optionsRows = pollOptions.map((opt, idx) => ({
+          poll_id: poll.id,
+          option_text: String(opt).trim(),
+          order_index: idx,
+        }));
+
+        const { data: insertedOptions, error: optionsError } = await supabase
+          .from('chat_poll_options')
+          .insert(optionsRows)
+          .select();
+
+        if (optionsError || !insertedOptions) {
+          console.error('❌ Error inserting poll options:', optionsError);
+          return callback({ error: 'Failed to create poll options' });
+        }
+
+        // Insert chat message referencing the poll
+        const { data: pollMessage, error: messageError } = await supabase
+          .from('chat_messages')
+          .insert({
+            conversation_id: conversationId,
+            sender_id: socket.userId,
+            message_text: pollQuestion.trim(),
+            message_type: 'poll',
+            poll_id: poll.id,
+            reply_to_id: replyToId,
+          })
+          .select()
+          .single();
+
+        if (messageError || !pollMessage) {
+          console.error('❌ Error inserting poll message:', messageError);
+          return callback({ error: 'Failed to send poll message' });
+        }
+
+        // Update conversation timestamp
+        await supabase
+          .from('chat_conversations')
+          .update({ updated_at: new Date().toISOString() })
+          .eq('id', conversationId);
+
+        // Build broadcast payload
+        const pollPayload = {
+          id: poll.id,
+          question: poll.question,
+          allow_multiple: poll.allow_multiple,
+          options: insertedOptions
+            .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
+            .map(o => ({ id: o.id, text: o.option_text, count: 0, voterIds: [] })),
+          my_votes: [],
+        };
+
+        const messageWithSender = {
+          ...pollMessage,
+          sender_name: socket.userName,
+          sender_role: socket.userRole,
+          reply_to: null,
+          poll: pollPayload,
+        };
+
+        io.to(conversationId).emit('new_message', messageWithSender);
+        console.log(`🗳️  Poll created in ${conversationId} by ${socket.userName}`);
+        return callback({ success: true, message: messageWithSender });
+      }
+
       // Insert message
       const { data: newMessage, error } = await supabase
         .from('chat_messages')
@@ -226,6 +358,125 @@ io.on('connection', async (socket) => {
     } catch (error) {
       console.error('❌ Error sending message:', error);
       callback({ error: 'Failed to send message' });
+    }
+  });
+
+  // ============================================
+  // VOTE POLL
+  // ============================================
+  socket.on('vote_poll', async (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    try {
+      const { conversationId, pollId, optionId, checked } = data || {};
+
+      // Basic validation
+      if (!conversationId || !pollId || !optionId || typeof checked !== 'boolean') {
+        return cb({ error: 'Invalid payload' });
+      }
+
+      // Validate participant
+      const { data: participant } = await supabase
+        .from('chat_participants')
+        .select('conversation_id')
+        .eq('conversation_id', conversationId)
+        .eq('user_id', socket.userId)
+        .single();
+
+      if (!participant) {
+        return cb({ error: 'Not a participant in this conversation' });
+      }
+
+      // Fetch poll and validate it belongs to the conversation
+      const { data: poll } = await supabase
+        .from('chat_polls')
+        .select('id, conversation_id, allow_multiple')
+        .eq('id', pollId)
+        .single();
+
+      if (!poll || poll.conversation_id !== conversationId) {
+        return cb({ error: 'Poll does not belong to conversation' });
+      }
+
+      // Ensure option belongs to poll
+      const { data: pollOptions } = await supabase
+        .from('chat_poll_options')
+        .select('id')
+        .eq('poll_id', pollId);
+
+      const optionIds = new Set((pollOptions || []).map(o => o.id));
+      if (!optionIds.has(optionId)) {
+        return cb({ error: 'Invalid option for this poll' });
+      }
+
+      // For single-choice: remove existing votes for this user before inserting a new one
+      if (!poll.allow_multiple && checked) {
+        await supabase
+          .from('chat_poll_votes')
+          .delete()
+          .eq('poll_id', pollId)
+          .eq('user_id', socket.userId);
+      }
+
+      if (checked) {
+        // Upsert vote (idempotent)
+        const { error: upsertErr } = await supabase
+          .from('chat_poll_votes')
+          .upsert({ poll_id: pollId, option_id: optionId, user_id: socket.userId }, { onConflict: 'poll_id,option_id,user_id' });
+        if (upsertErr) {
+          console.error('❌ Error upserting vote:', upsertErr);
+          return cb({ error: 'Failed to cast vote' });
+        }
+      } else {
+        // Remove vote
+        const { error: delErr } = await supabase
+          .from('chat_poll_votes')
+          .delete()
+          .eq('poll_id', pollId)
+          .eq('option_id', optionId)
+          .eq('user_id', socket.userId);
+        if (delErr) {
+          console.error('❌ Error deleting vote:', delErr);
+          return cb({ error: 'Failed to remove vote' });
+        }
+      }
+
+      // Fetch all votes for tallies and recent voters
+      const { data: votes } = await supabase
+        .from('chat_poll_votes')
+        .select('option_id, user_id, created_at')
+        .eq('poll_id', pollId)
+        .order('created_at', { ascending: false });
+
+      const countsByOption = new Map();
+      const votersByOption = {};
+      (votes || []).forEach(v => {
+        countsByOption.set(v.option_id, (countsByOption.get(v.option_id) || 0) + 1);
+        if (!votersByOption[v.option_id]) votersByOption[v.option_id] = [];
+        if (votersByOption[v.option_id].length < 3) {
+          votersByOption[v.option_id].push(v.user_id);
+        }
+      });
+
+      const totals = Array.from(optionIds).map(id => ({ optionId: id, count: countsByOption.get(id) || 0 }));
+      const myVotes = (votes || [])
+        .filter(v => v.user_id === socket.userId)
+        .map(v => v.option_id);
+
+      const payload = {
+        conversationId,
+        pollId,
+        totals,
+        votersByOption,
+        myVotes,
+      };
+
+      io.to(conversationId).emit('poll_updated', payload);
+      console.log(`🗳️  Vote ${checked ? 'added' : 'removed'} by ${socket.userName} on poll ${pollId}`);
+      cb({ success: true, ...payload });
+    } catch (error) {
+      console.error('❌ Error handling vote_poll:', error);
+      const cb = typeof callback === 'function' ? callback : () => {};
+      cb({ error: 'Failed to process vote' });
     }
   });
 
